@@ -182,51 +182,56 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
     }
   }, [isHost, roomId, enabled, otpRemainingSeconds]);
 
-  // 5. Active synchronization polling (every 3s) to guarantee Desktop image sync on Vercel Serverless
+  // 5. Active synchronization polling (every 3s) — ADDITIVE ONLY
+  //    On Vercel Serverless each request may hit a different container.
+  //    We NEVER remove client files based on polling (that would cause files
+  //    to vanish when a cold container returns an empty list).
+  //    Removals only come from SSE events (file_removed / room_cleared) or user actions.
+  const selfDeviceIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    selfDeviceIdRef.current = useDeviceStore.getState().deviceId;
+  }, []);
+
   useEffect(() => {
     if (!roomId || !enabled) return;
 
     const syncInterval = setInterval(async () => {
       try {
         const base = `/api/room/${encodeURIComponent(roomId)}`;
-        const res = await fetch(`${base}/files`, { cache: 'no-store' });
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data.files)) {
-            const store = useFastroomStore.getState();
-            const currentFiles = store.files;
+        const res = await fetch(`${base}/files`, {
+          cache: 'no-store',
+          headers: { 'x-client-ts': String(Date.now()) },
+        });
+        if (!res.ok) return;
 
-            const serverIds = new Set(data.files.map((f: SharedFile) => f.id));
-            const clientIds = new Set(currentFiles.map((f) => f.id));
+        const data = await res.json();
+        if (!Array.isArray(data.files)) return;
 
-            // Add/update files that server has but client doesn't (or has different content)
-            for (const serverFile of data.files) {
-              const clientFile = currentFiles.find((f) => f.id === serverFile.id);
-              if (!clientFile) {
-                // New file
-                store.addFile(serverFile);
-                playNotificationSound();
-                toast.success(`Ảnh mới: ${serverFile.name}`, {
-                  description: `${
-                    serverFile.senderDevice ? `Từ ${serverFile.senderDevice} • ` : ''
-                  }Tự động xóa sau 5 phút.`,
-                });
-              } else if (clientFile.isPinned !== serverFile.isPinned) {
-                // Sync pin state
-                store.updateFile(serverFile);
-              }
+        // Ignore empty responses — could be a cold serverless container
+        // that doesn't know about uploaded files yet.
+        if (data.files.length === 0) return;
+
+        const store = useFastroomStore.getState();
+        const currentFiles = store.files;
+        const clientIds = new Set(currentFiles.map((f) => f.id));
+
+        for (const serverFile of data.files as SharedFile[]) {
+          if (!clientIds.has(serverFile.id)) {
+            // New file the client doesn't know about yet
+            store.addFile(serverFile);
+            // Only notify for files sent by someone else
+            const isSelf = serverFile.senderDeviceId && serverFile.senderDeviceId === selfDeviceIdRef.current;
+            if (!isSelf) {
+              playNotificationSound();
+              toast.success(`Ảnh mới: ${serverFile.name}`, {
+                description: `${serverFile.senderDevice ? `Từ ${serverFile.senderDevice} • ` : ''}Tự động xóa sau 5 phút.`,
+              });
             }
-
-            // Remove files client has but server no longer has
-            for (const clientFile of currentFiles) {
-              if (!serverIds.has(clientFile.id)) {
-                store.removeFile(clientFile.id);
-              }
-            }
-
-            // If counts still mismatch after reconcile, do a full reset
-            if (Math.abs(data.files.length - clientIds.size) > 2) {
-              store.setFiles(data.files);
+          } else {
+            // File exists — only sync pin state changes
+            const clientFile = currentFiles.find((f) => f.id === serverFile.id);
+            if (clientFile && clientFile.isPinned !== serverFile.isPinned) {
+              store.updateFile(serverFile);
             }
           }
         }

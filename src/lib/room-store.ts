@@ -371,11 +371,21 @@ class FastroomManager {
     return () => {
       room.subscribers.delete(listener);
       room.lastActivityAt = Date.now();
-      if (room.subscribers.size === 0 && room.files.size === 0) {
-        if (room.otpInterval) clearInterval(room.otpInterval);
-        this.rooms.delete(normalizedId);
-        this.saveDiskState();
-      }
+      // Don't delete the room immediately — client may be reconnecting.
+      // Schedule a deferred cleanup after 30s, only if truly empty.
+      setTimeout(() => {
+        const current = this.rooms.get(normalizedId);
+        if (
+          current &&
+          current.subscribers.size === 0 &&
+          current.files.size === 0 &&
+          !current.hasHost
+        ) {
+          if (current.otpInterval) clearInterval(current.otpInterval);
+          this.rooms.delete(normalizedId);
+          this.saveDiskState();
+        }
+      }, 30_000);
     };
   }
 
@@ -395,15 +405,10 @@ class FastroomManager {
       }
     }
 
-    // Clean up any dead sockets
+    // Clean up dead sockets only — do NOT delete the room here.
+    // Room lifecycle is managed by subscribe() with a 30s deferred cleanup.
     for (const dead of deadListeners) {
       room.subscribers.delete(dead);
-    }
-
-    if (room.subscribers.size === 0 && room.files.size === 0) {
-      if (room.otpInterval) clearInterval(room.otpInterval);
-      this.rooms.delete(normalizedId);
-      this.saveDiskState();
     }
   }
 

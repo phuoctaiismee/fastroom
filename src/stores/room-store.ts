@@ -50,8 +50,11 @@ function persistFiles(roomId: string | null, files: SharedFile[]) {
   }
 }
 
+// 10-second grace to tolerate clock skew between server and client
+const EXPIRY_GRACE_MS = 10_000;
+
 function isAlive(file: SharedFile, now: number) {
-  return file.isPinned || file.expiresAt > now;
+  return file.isPinned || file.expiresAt + EXPIRY_GRACE_MS > now;
 }
 
 export const useFastroomStore = create<FastroomState>((set, get) => ({
