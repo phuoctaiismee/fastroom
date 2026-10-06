@@ -1,43 +1,6 @@
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
+import { SharedFile, RoomEvent, AvailableRoomSummary, FILE_TTL_MS, OTP_TTL_MS } from './room-types';
 
-export interface SharedFile {
-  id: string;
-  roomId: string;
-  name: string;
-  type: string;
-  size: number;
-  dataUrl: string; // Base64 Data URL
-  createdAt: number;
-  expiresAt: number;
-  senderName?: string;
-  senderDevice?: string;
-  senderDeviceId?: string;
-  isPinned?: boolean; // Pinned files are never auto-deleted (server-side, synced to all devices)
-}
-
-export type RoomEvent =
-  | { type: 'file_added'; file: SharedFile }
-  | { type: 'file_updated'; file: SharedFile }
-  | { type: 'file_removed'; fileId: string; roomId: string }
-  | { type: 'room_cleared'; roomId: string }
-  | { type: 'otp_rotated'; otp: string; expiresAt: number }
-  | { type: 'peer_joined'; deviceName: string; deviceId?: string; timestamp: number }
-  | { type: 'ping'; timestamp: number };
-
-export interface AvailableRoomSummary {
-  roomId: string;
-  fileCount: number;
-  clientsCount: number;
-  createdAt: number;
-  lastActivityAt: number;
-  hasHost: boolean;
-  isAvailable: boolean;
-}
-
-export const FILE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-export const OTP_TTL_MS = 60 * 1000; // 60 seconds
+export * from './room-types';
 
 interface RoomState {
   id: string;
@@ -62,13 +25,16 @@ function generate6DigitOtp(): string {
 class FastroomManager {
   private rooms: Map<string, RoomState> = new Map();
 
-  private getStorageFilePath(): string {
-    return path.join(os.tmpdir(), 'fastroom_ephemeral_store.json');
-  }
-
   private saveDiskState() {
+    if (typeof window !== 'undefined') return;
     try {
-      const filePath = this.getStorageFilePath();
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('fs');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const path = require('path');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const os = require('os');
+      const filePath = path.join(os.tmpdir(), 'fastroom_ephemeral_store.json');
       const exportData: Record<string, SharedFile[]> = {};
       const now = Date.now();
 
@@ -91,8 +57,15 @@ class FastroomManager {
   }
 
   private loadDiskState(roomId: string) {
+    if (typeof window !== 'undefined') return;
     try {
-      const filePath = this.getStorageFilePath();
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('fs');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const path = require('path');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const os = require('os');
+      const filePath = path.join(os.tmpdir(), 'fastroom_ephemeral_store.json');
       if (!fs.existsSync(filePath)) return;
 
       const raw = fs.readFileSync(filePath, 'utf-8');
@@ -489,4 +462,3 @@ declare global {
 
 export const fastroomManager = globalThis.__fastroomManager ?? new FastroomManager();
 globalThis.__fastroomManager = fastroomManager;
-
