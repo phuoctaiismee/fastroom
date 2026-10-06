@@ -8,7 +8,7 @@ export async function POST(
   context: { params: Promise<{ roomId: string }> }
 ) {
   const { roomId } = await context.params;
-  fastroomManager.clearRoom(roomId);
+  await fastroomManager.clearRoomAsync(roomId);
 
   return NextResponse.json({
     success: true,

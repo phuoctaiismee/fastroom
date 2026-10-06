@@ -29,7 +29,7 @@ export async function POST(
       );
     }
 
-    const file = fastroomManager.addFile(roomId, {
+    const file = await fastroomManager.addFileAsync(roomId, {
       id: id || `f_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
       roomId,
       name,

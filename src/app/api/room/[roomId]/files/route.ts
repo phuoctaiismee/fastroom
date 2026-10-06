@@ -9,7 +9,7 @@ export async function GET(
   context: { params: Promise<{ roomId: string }> }
 ) {
   const { roomId } = await context.params;
-  const activeFiles = fastroomManager.getActiveFiles(roomId);
+  const activeFiles = await fastroomManager.getActiveFilesAsync(roomId);
 
   return NextResponse.json(
     {

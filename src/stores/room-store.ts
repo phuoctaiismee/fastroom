@@ -36,14 +36,22 @@ interface FastroomState {
   tickNow: () => void;
 }
 
-// Persist the file list per room in sessionStorage for instant (0ms) reloads
+// Persist the file list per room in localStorage/sessionStorage for instant (0ms) reloads
 function persistFiles(roomId: string | null, files: SharedFile[]) {
   if (!roomId || typeof window === 'undefined') return;
   try {
+    const key = `fastroom_files_${roomId}`;
     if (files.length === 0) {
-      sessionStorage.removeItem(`fastroom_files_${roomId}`);
+      localStorage.removeItem(key);
+      sessionStorage.removeItem(key);
     } else {
-      sessionStorage.setItem(`fastroom_files_${roomId}`, JSON.stringify(files));
+      const dataStr = JSON.stringify(files);
+      try {
+        localStorage.setItem(key, dataStr);
+      } catch {}
+      try {
+        sessionStorage.setItem(key, dataStr);
+      } catch {}
     }
   } catch {
     // Quota exceeded (large base64 images) -> just skip caching
@@ -76,7 +84,8 @@ export const useFastroomStore = create<FastroomState>((set, get) => ({
     let cachedFiles: SharedFile[] = [];
     if (typeof window !== 'undefined') {
       try {
-        const raw = sessionStorage.getItem(`fastroom_files_${roomId}`);
+        const key = `fastroom_files_${roomId}`;
+        const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
         if (raw) {
           const parsed = JSON.parse(raw);
           if (Array.isArray(parsed)) {
@@ -96,9 +105,28 @@ export const useFastroomStore = create<FastroomState>((set, get) => ({
 
   setIsLoadingFiles: (isLoadingFiles: boolean) => set({ isLoadingFiles }),
 
-  setFiles: (files: SharedFile[]) => {
-    persistFiles(get().roomId, files);
-    set({ files, isLoadingFiles: false });
+  setFiles: (incomingFiles: SharedFile[]) => {
+    const currentFiles = get().files;
+    const now = Date.now();
+
+    // Map existing files
+    const fileMap = new Map<string, SharedFile>();
+    for (const f of currentFiles) {
+      if (isAlive(f, now)) {
+        fileMap.set(f.id, f);
+      }
+    }
+
+    // Merge incoming files from server
+    for (const f of incomingFiles) {
+      if (isAlive(f, now)) {
+        fileMap.set(f.id, f);
+      }
+    }
+
+    const merged = Array.from(fileMap.values()).sort((a, b) => b.createdAt - a.createdAt);
+    persistFiles(get().roomId, merged);
+    set({ files: merged, isLoadingFiles: false });
   },
 
   addFile: (file: SharedFile) => {

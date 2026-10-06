@@ -8,7 +8,7 @@ export async function DELETE(
   context: { params: Promise<{ roomId: string; fileId: string }> }
 ) {
   const { roomId, fileId } = await context.params;
-  const removed = fastroomManager.removeFile(roomId, fileId);
+  const removed = await fastroomManager.removeFileAsync(roomId, fileId);
 
   return NextResponse.json({
     success: removed,
@@ -35,7 +35,7 @@ export async function PATCH(
     return NextResponse.json({ error: '`pinned` must be a boolean' }, { status: 400 });
   }
 
-  const file = fastroomManager.setFilePinned(roomId, fileId, pinned);
+  const file = await fastroomManager.setFilePinnedAsync(roomId, fileId, pinned);
   if (!file) {
     return NextResponse.json({ error: 'File không tồn tại hoặc đã hết hạn' }, { status: 404 });
   }

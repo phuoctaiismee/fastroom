@@ -29,8 +29,19 @@ To learn more about Next.js, take a look at the following resources:
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 
-## Deploy on Vercel
+## Deploy on Vercel & Multi-Instance Realtime Setup
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Fastroom is optimized for Vercel Serverless Functions out of the box with client-side smart storage persistence and automatic cross-container polling.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### Optional: Enable Vercel KV / Upstash Redis (Recommended for 100% Realtime Multi-Lambda Sync)
+
+Because Vercel Serverless Functions execute on isolated AWS Lambda containers, enabling Vercel KV / Upstash Redis provides shared persistent storage and cross-container pub/sub event stream distribution across all Vercel instances:
+
+1. Go to your project dashboard on [Vercel](https://vercel.com).
+2. Click **Storage** -> **Create Database** -> Select **Vercel KV** or **Upstash Redis**.
+3. Connect the KV database to your project. Vercel automatically sets the environment variables:
+   - `KV_REST_API_URL`
+   - `KV_REST_API_TOKEN`
+   (or `UPSTASH_REDIS_REST_URL` & `UPSTASH_REDIS_REST_TOKEN`)
+4. Redeploy your project on Vercel. Fastroom will automatically detect Vercel KV and enable cross-instance realtime SSE event distribution and 5-minute persistent storage across all serverless containers!
+

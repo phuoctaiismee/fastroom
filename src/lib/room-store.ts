@@ -392,6 +392,17 @@ class FastroomManager {
   public broadcast(roomId: string, event: RoomEvent) {
     const normalizedId = roomId.trim().toLowerCase();
     const room = this.rooms.get(normalizedId);
+
+    // Push event to Redis for cross-serverless event distribution if configured
+    if (IS_REDIS_ENABLED) {
+      redisCommand([
+        'RPUSH',
+        `fastroom:events:${normalizedId}`,
+        JSON.stringify({ ...event, _ts: Date.now() }),
+      ]).catch(() => {});
+      redisCommand(['EXPIRE', `fastroom:events:${normalizedId}`, 300]).catch(() => {});
+    }
+
     if (!room) return;
 
     room.lastActivityAt = Date.now();
@@ -405,18 +416,44 @@ class FastroomManager {
       }
     }
 
-    // Clean up dead sockets only — do NOT delete the room here.
-    // Room lifecycle is managed by subscribe() with a 30s deferred cleanup.
+    // Clean up dead sockets only
     for (const dead of deadListeners) {
       room.subscribers.delete(dead);
     }
+  }
+
+  public async addFileAsync(
+    roomId: string,
+    payload: Omit<SharedFile, 'createdAt' | 'expiresAt'>
+  ): Promise<SharedFile> {
+    const normalizedId = roomId.trim().toLowerCase();
+    const file = this.addFile(normalizedId, payload);
+
+    if (IS_REDIS_ENABLED) {
+      try {
+        const fileKey = `fastroom:file:${normalizedId}:${file.id}`;
+        const setKey = `fastroom:room:${normalizedId}:files`;
+        const payloadStr = JSON.stringify(file);
+
+        await Promise.all([
+          redisCommand(['SET', fileKey, payloadStr, 'EX', 300]),
+          redisCommand(['SADD', setKey, file.id]),
+          redisCommand(['EXPIRE', setKey, 300]),
+        ]);
+      } catch (err) {
+        console.error('[Redis addFile error]', err);
+      }
+    }
+
+    return file;
   }
 
   public addFile(
     roomId: string,
     payload: Omit<SharedFile, 'createdAt' | 'expiresAt'>
   ): SharedFile {
-    const room = this.getOrCreateRoom(roomId);
+    const normalizedId = roomId.trim().toLowerCase();
+    const room = this.getOrCreateRoom(normalizedId);
     const now = Date.now();
     const expiresAt = now + FILE_TTL_MS;
 
@@ -430,14 +467,13 @@ class FastroomManager {
     room.lastActivityAt = now;
 
     const timer = setTimeout(() => {
-      this.removeFile(roomId, file.id);
+      this.removeFile(normalizedId, file.id);
     }, FILE_TTL_MS);
 
     room.timers.set(file.id, timer);
-
     this.saveDiskState();
 
-    this.broadcast(roomId, {
+    this.broadcast(normalizedId, {
       type: 'file_added',
       file,
     });
@@ -445,8 +481,25 @@ class FastroomManager {
     return file;
   }
 
+  public async removeFileAsync(roomId: string, fileId: string): Promise<boolean> {
+    const normalizedId = roomId.trim().toLowerCase();
+    const existed = this.removeFile(normalizedId, fileId);
+
+    if (IS_REDIS_ENABLED) {
+      try {
+        await Promise.all([
+          redisCommand(['DEL', `fastroom:file:${normalizedId}:${fileId}`]),
+          redisCommand(['SREM', `fastroom:room:${normalizedId}:files`, fileId]),
+        ]);
+      } catch {}
+    }
+
+    return existed;
+  }
+
   public removeFile(roomId: string, fileId: string): boolean {
-    const room = this.getOrCreateRoom(roomId);
+    const normalizedId = roomId.trim().toLowerCase();
+    const room = this.getOrCreateRoom(normalizedId);
     const timer = room.timers.get(fileId);
     if (timer) {
       clearTimeout(timer);
@@ -457,17 +510,35 @@ class FastroomManager {
     if (existed) {
       room.lastActivityAt = Date.now();
       this.saveDiskState();
-      this.broadcast(roomId, {
+      this.broadcast(normalizedId, {
         type: 'file_removed',
         fileId,
-        roomId,
+        roomId: normalizedId,
       });
     }
     return existed;
   }
 
+  public async clearRoomAsync(roomId: string) {
+    const normalizedId = roomId.trim().toLowerCase();
+    this.clearRoom(normalizedId);
+
+    if (IS_REDIS_ENABLED) {
+      try {
+        const fileIds = await redisCommand<string[]>(['SMEMBERS', `fastroom:room:${normalizedId}:files`]);
+        if (Array.isArray(fileIds)) {
+          for (const id of fileIds) {
+            redisCommand(['DEL', `fastroom:file:${normalizedId}:${id}`]).catch(() => {});
+          }
+        }
+        await redisCommand(['DEL', `fastroom:room:${normalizedId}:files`]);
+      } catch {}
+    }
+  }
+
   public clearRoom(roomId: string) {
-    const room = this.getOrCreateRoom(roomId);
+    const normalizedId = roomId.trim().toLowerCase();
+    const room = this.getOrCreateRoom(normalizedId);
     for (const timer of room.timers.values()) {
       clearTimeout(timer);
     }
@@ -476,10 +547,29 @@ class FastroomManager {
     room.lastActivityAt = Date.now();
     this.saveDiskState();
 
-    this.broadcast(roomId, {
+    this.broadcast(normalizedId, {
       type: 'room_cleared',
-      roomId,
+      roomId: normalizedId,
     });
+  }
+
+  public async setFilePinnedAsync(roomId: string, fileId: string, pinned: boolean): Promise<SharedFile | null> {
+    const normalizedId = roomId.trim().toLowerCase();
+    const updated = this.setFilePinned(normalizedId, fileId, pinned);
+
+    if (IS_REDIS_ENABLED && updated) {
+      try {
+        const fileKey = `fastroom:file:${normalizedId}:${fileId}`;
+        const payloadStr = JSON.stringify(updated);
+        if (pinned) {
+          await redisCommand(['SET', fileKey, payloadStr, 'EX', 86400]); // 24h for pinned
+        } else {
+          await redisCommand(['SET', fileKey, payloadStr, 'EX', 300]); // 5m for unpinned
+        }
+      } catch {}
+    }
+
+    return updated;
   }
 
   public setFilePinned(roomId: string, fileId: string, pinned: boolean): SharedFile | null {
@@ -518,6 +608,46 @@ class FastroomManager {
     return updated;
   }
 
+  public async getActiveFilesAsync(roomId: string): Promise<SharedFile[]> {
+    const normalizedId = roomId.trim().toLowerCase();
+    const localFiles = this.getActiveFiles(normalizedId);
+
+    if (!IS_REDIS_ENABLED) {
+      return localFiles;
+    }
+
+    try {
+      const fileIds = await redisCommand<string[]>(['SMEMBERS', `fastroom:room:${normalizedId}:files`]);
+      if (!Array.isArray(fileIds) || fileIds.length === 0) {
+        return localFiles;
+      }
+
+      const fetchedFiles: SharedFile[] = [];
+      const now = Date.now();
+
+      for (const id of fileIds) {
+        const raw = await redisCommand<string>(['GET', `fastroom:file:${normalizedId}:${id}`]);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw) as SharedFile;
+            if (parsed.isPinned || parsed.expiresAt > now) {
+              fetchedFiles.push(parsed);
+            }
+          } catch {}
+        }
+      }
+
+      // Merge local and Redis files without duplicates
+      const fileMap = new Map<string, SharedFile>();
+      for (const f of localFiles) fileMap.set(f.id, f);
+      for (const f of fetchedFiles) fileMap.set(f.id, f);
+
+      return Array.from(fileMap.values()).sort((a, b) => b.createdAt - a.createdAt);
+    } catch {
+      return localFiles;
+    }
+  }
+
   public getActiveFiles(roomId: string): SharedFile[] {
     const normalizedId = roomId.trim().toLowerCase();
     this.loadDiskState(normalizedId);
@@ -544,6 +674,57 @@ class FastroomManager {
   }
 }
 
+const REDIS_URL =
+  process.env.KV_REST_API_URL ||
+  process.env.UPSTASH_REDIS_REST_URL ||
+  process.env.STORAGE_REST_API_URL ||
+  process.env.REDIS_REST_API_URL;
+
+const REDIS_TOKEN =
+  process.env.KV_REST_API_TOKEN ||
+  process.env.UPSTASH_REDIS_REST_TOKEN ||
+  process.env.STORAGE_REST_API_TOKEN ||
+  process.env.REDIS_REST_API_TOKEN;
+
+export const IS_REDIS_ENABLED = !!(REDIS_URL && REDIS_TOKEN);
+
+export async function redisCommand<T = unknown>(command: (string | number)[]): Promise<T | null> {
+  if (!REDIS_URL || !REDIS_TOKEN) return null;
+  try {
+    const res = await fetch(REDIS_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${REDIS_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(command),
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.result as T;
+  } catch (err) {
+    console.error('[Redis error]', err);
+    return null;
+  }
+}
+
+export async function fetchRedisEvents(roomId: string, start = 0): Promise<RoomEvent[]> {
+  if (!IS_REDIS_ENABLED) return [];
+  const normalizedId = roomId.trim().toLowerCase();
+  const rawList = await redisCommand<string[]>(['LRANGE', `fastroom:events:${normalizedId}`, start, -1]);
+  if (!Array.isArray(rawList)) return [];
+  return rawList
+    .map((item) => {
+      try {
+        return JSON.parse(item) as RoomEvent;
+      } catch {
+        return null;
+      }
+    })
+    .filter((e): e is RoomEvent => e !== null);
+}
+
 declare global {
   // eslint-disable-next-line no-var
   var __fastroomManager: FastroomManager | undefined;
@@ -551,3 +732,4 @@ declare global {
 
 export const fastroomManager = globalThis.__fastroomManager ?? new FastroomManager();
 globalThis.__fastroomManager = fastroomManager;
+
