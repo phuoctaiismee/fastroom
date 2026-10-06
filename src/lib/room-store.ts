@@ -1,5 +1,6 @@
-// In-memory room and event store for Fastroom
-// Ephemeral storage: files kept for 5 mins, OTP code rotating every 60s
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 export interface SharedFile {
   id: string;
@@ -60,6 +61,70 @@ function generate6DigitOtp(): string {
 
 class FastroomManager {
   private rooms: Map<string, RoomState> = new Map();
+
+  private getStorageFilePath(): string {
+    return path.join(os.tmpdir(), 'fastroom_ephemeral_store.json');
+  }
+
+  private saveDiskState() {
+    try {
+      const filePath = this.getStorageFilePath();
+      const exportData: Record<string, SharedFile[]> = {};
+      const now = Date.now();
+
+      for (const [roomId, room] of this.rooms.entries()) {
+        const active: SharedFile[] = [];
+        for (const file of room.files.values()) {
+          if (file.isPinned || file.expiresAt > now) {
+            active.push(file);
+          }
+        }
+        if (active.length > 0) {
+          exportData[roomId] = active;
+        }
+      }
+
+      fs.writeFileSync(filePath, JSON.stringify(exportData), 'utf-8');
+    } catch {
+      // Ignore write errors
+    }
+  }
+
+  private loadDiskState(roomId: string) {
+    try {
+      const filePath = this.getStorageFilePath();
+      if (!fs.existsSync(filePath)) return;
+
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      if (!raw) return;
+
+      const exportData: Record<string, SharedFile[]> = JSON.parse(raw);
+      const normalizedId = roomId.trim().toLowerCase();
+      const roomFiles = exportData[normalizedId];
+
+      if (Array.isArray(roomFiles)) {
+        const room = this.getOrCreateRoom(normalizedId);
+        const now = Date.now();
+
+        for (const file of roomFiles) {
+          if (file.isPinned || file.expiresAt > now) {
+            if (!room.files.has(file.id)) {
+              room.files.set(file.id, file);
+              if (!file.isPinned) {
+                const remaining = Math.max(1000, file.expiresAt - now);
+                const timer = setTimeout(() => {
+                  this.removeFile(normalizedId, file.id);
+                }, remaining);
+                room.timers.set(file.id, timer);
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // Ignore read errors
+    }
+  }
 
   public getOrCreateRoom(roomId: string, isHost = false): RoomState {
     const normalizedId = roomId.trim().toLowerCase();
@@ -308,6 +373,8 @@ class FastroomManager {
 
     room.timers.set(file.id, timer);
 
+    this.saveDiskState();
+
     this.broadcast(roomId, {
       type: 'file_added',
       file,
@@ -327,6 +394,7 @@ class FastroomManager {
     const existed = room.files.delete(fileId);
     if (existed) {
       room.lastActivityAt = Date.now();
+      this.saveDiskState();
       this.broadcast(roomId, {
         type: 'file_removed',
         fileId,
@@ -344,6 +412,7 @@ class FastroomManager {
     room.timers.clear();
     room.files.clear();
     room.lastActivityAt = Date.now();
+    this.saveDiskState();
 
     this.broadcast(roomId, {
       type: 'room_cleared',
@@ -382,12 +451,14 @@ class FastroomManager {
 
     room.files.set(fileId, updated);
     room.lastActivityAt = now;
+    this.saveDiskState();
     this.broadcast(normalizedId, { type: 'file_updated', file: updated });
     return updated;
   }
 
   public getActiveFiles(roomId: string): SharedFile[] {
     const normalizedId = roomId.trim().toLowerCase();
+    this.loadDiskState(normalizedId);
     const room = this.rooms.get(normalizedId);
     if (!room) return [];
 
