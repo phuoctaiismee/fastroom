@@ -18,6 +18,18 @@ interface RoomState {
   hasHost: boolean;
 }
 
+interface SerializedRoom {
+  id: string;
+  currentOtp: string;
+  prevOtp?: string;
+  otpExpiresAt: number;
+  authorizedTokens: string[];
+  files: SharedFile[];
+  createdAt: number;
+  lastActivityAt: number;
+  hasHost: boolean;
+}
+
 function generate6DigitOtp(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
@@ -25,29 +37,42 @@ function generate6DigitOtp(): string {
 class FastroomManager {
   private rooms: Map<string, RoomState> = new Map();
 
+  private getStorageFilePath(): string {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require('path');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const os = require('os');
+    return path.join(os.tmpdir(), 'fastroom_ephemeral_store.json');
+  }
+
   private saveDiskState() {
     if (typeof window !== 'undefined') return;
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const fs = require('fs');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const path = require('path');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const os = require('os');
-      const filePath = path.join(os.tmpdir(), 'fastroom_ephemeral_store.json');
-      const exportData: Record<string, SharedFile[]> = {};
+      const filePath = this.getStorageFilePath();
+      const exportData: Record<string, SerializedRoom> = {};
       const now = Date.now();
 
       for (const [roomId, room] of this.rooms.entries()) {
-        const active: SharedFile[] = [];
+        const activeFiles: SharedFile[] = [];
         for (const file of room.files.values()) {
           if (file.isPinned || file.expiresAt > now) {
-            active.push(file);
+            activeFiles.push(file);
           }
         }
-        if (active.length > 0) {
-          exportData[roomId] = active;
-        }
+
+        exportData[roomId] = {
+          id: room.id,
+          currentOtp: room.currentOtp,
+          prevOtp: room.prevOtp,
+          otpExpiresAt: room.otpExpiresAt,
+          authorizedTokens: Array.from(room.authorizedTokens),
+          files: activeFiles,
+          createdAt: room.createdAt,
+          lastActivityAt: room.lastActivityAt,
+          hasHost: room.hasHost,
+        };
       }
 
       fs.writeFileSync(filePath, JSON.stringify(exportData), 'utf-8');
@@ -61,34 +86,66 @@ class FastroomManager {
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const fs = require('fs');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const path = require('path');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const os = require('os');
-      const filePath = path.join(os.tmpdir(), 'fastroom_ephemeral_store.json');
+      const filePath = this.getStorageFilePath();
       if (!fs.existsSync(filePath)) return;
 
       const raw = fs.readFileSync(filePath, 'utf-8');
       if (!raw) return;
 
-      const exportData: Record<string, SharedFile[]> = JSON.parse(raw);
+      const exportData: Record<string, SerializedRoom> = JSON.parse(raw);
       const normalizedId = roomId.trim().toLowerCase();
-      const roomFiles = exportData[normalizedId];
+      const savedRoom = exportData[normalizedId];
 
-      if (Array.isArray(roomFiles)) {
-        const room = this.getOrCreateRoom(normalizedId);
+      if (savedRoom) {
+        let room = this.rooms.get(normalizedId);
         const now = Date.now();
 
-        for (const file of roomFiles) {
-          if (file.isPinned || file.expiresAt > now) {
-            if (!room.files.has(file.id)) {
-              room.files.set(file.id, file);
-              if (!file.isPinned) {
-                const remaining = Math.max(1000, file.expiresAt - now);
-                const timer = setTimeout(() => {
-                  this.removeFile(normalizedId, file.id);
-                }, remaining);
-                room.timers.set(file.id, timer);
+        if (!room) {
+          room = {
+            id: normalizedId,
+            files: new Map(),
+            subscribers: new Set(),
+            timers: new Map(),
+            currentOtp: savedRoom.currentOtp || generate6DigitOtp(),
+            prevOtp: savedRoom.prevOtp,
+            otpExpiresAt: savedRoom.otpExpiresAt || now + OTP_TTL_MS,
+            authorizedTokens: new Set(savedRoom.authorizedTokens || []),
+            createdAt: savedRoom.createdAt || now,
+            lastActivityAt: savedRoom.lastActivityAt || now,
+            hasHost: savedRoom.hasHost || false,
+          };
+          this.setupOtpRotation(normalizedId, room);
+          this.rooms.set(normalizedId, room);
+        } else {
+          // Sync OTP & security tokens from disk if present
+          if (savedRoom.currentOtp) {
+            room.currentOtp = savedRoom.currentOtp;
+            room.prevOtp = savedRoom.prevOtp;
+            room.otpExpiresAt = savedRoom.otpExpiresAt;
+          }
+          if (savedRoom.hasHost) {
+            room.hasHost = true;
+          }
+          if (Array.isArray(savedRoom.authorizedTokens)) {
+            for (const tok of savedRoom.authorizedTokens) {
+              room.authorizedTokens.add(tok);
+            }
+          }
+        }
+
+        // Sync files
+        if (Array.isArray(savedRoom.files)) {
+          for (const file of savedRoom.files) {
+            if (file.isPinned || file.expiresAt > now) {
+              if (!room.files.has(file.id)) {
+                room.files.set(file.id, file);
+                if (!file.isPinned) {
+                  const remaining = Math.max(1000, file.expiresAt - now);
+                  const timer = setTimeout(() => {
+                    this.removeFile(normalizedId, file.id);
+                  }, remaining);
+                  room.timers.set(file.id, timer);
+                }
               }
             }
           }
@@ -101,6 +158,7 @@ class FastroomManager {
 
   public getOrCreateRoom(roomId: string, isHost = false): RoomState {
     const normalizedId = roomId.trim().toLowerCase();
+    this.loadDiskState(normalizedId);
     let room = this.rooms.get(normalizedId);
     const now = Date.now();
 
@@ -124,10 +182,12 @@ class FastroomManager {
       // Set up recurring 60s rotation
       this.setupOtpRotation(normalizedId, room);
       this.rooms.set(normalizedId, room);
+      this.saveDiskState();
     } else {
       room.lastActivityAt = now;
       if (isHost) {
         room.hasHost = true;
+        this.saveDiskState();
       }
     }
     return room;
@@ -144,6 +204,8 @@ class FastroomManager {
       room.currentOtp = generate6DigitOtp();
       room.otpExpiresAt = now + OTP_TTL_MS;
 
+      this.saveDiskState();
+
       // Broadcast new OTP to clients (desktop screen)
       this.broadcast(normalizedId, {
         type: 'otp_rotated',
@@ -157,8 +219,7 @@ class FastroomManager {
     const list: AvailableRoomSummary[] = [];
 
     for (const [id, room] of this.rooms.entries()) {
-      // Room is ONLY available if someone is actively connected OR there are active files
-      const isAlive = room.subscribers.size > 0 || room.files.size > 0;
+      const isAlive = room.subscribers.size > 0 || room.files.size > 0 || room.hasHost;
 
       if (isAlive) {
         list.push({
@@ -171,7 +232,6 @@ class FastroomManager {
           isAvailable: true,
         });
       } else {
-        // Immediate cleanup of empty room with 0 subscribers and 0 files
         if (room.otpInterval) clearInterval(room.otpInterval);
         this.rooms.delete(id);
       }
@@ -189,6 +249,7 @@ class FastroomManager {
     hasHost: boolean;
   } {
     const normalizedId = roomId.trim().toLowerCase();
+    this.loadDiskState(normalizedId);
     const room = this.rooms.get(normalizedId);
     if (!room) {
       return {
@@ -201,7 +262,7 @@ class FastroomManager {
       };
     }
 
-    const isAvailable = room.subscribers.size > 0 || room.files.size > 0;
+    const isAvailable = room.subscribers.size > 0 || room.files.size > 0 || room.hasHost;
 
     return {
       roomId: normalizedId,
@@ -234,6 +295,7 @@ class FastroomManager {
     deviceId?: string
   ): { success: boolean; authToken?: string; error?: string } {
     const normalizedId = roomId.trim().toLowerCase();
+    this.loadDiskState(normalizedId);
     const room = this.rooms.get(normalizedId);
 
     // If room does not exist or has no active host/subscribers/files
@@ -256,6 +318,7 @@ class FastroomManager {
     const authToken = `tok_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     room.authorizedTokens.add(authToken);
     room.lastActivityAt = Date.now();
+    this.saveDiskState();
 
     // Broadcast to desktop that a peer joined
     this.broadcast(roomId, {
@@ -270,7 +333,9 @@ class FastroomManager {
 
   public isAuthorized(roomId: string, authToken?: string | null): boolean {
     if (!authToken) return false;
-    const room = this.rooms.get(roomId.trim().toLowerCase());
+    const normalizedId = roomId.trim().toLowerCase();
+    this.loadDiskState(normalizedId);
+    const room = this.rooms.get(normalizedId);
     if (!room) return false;
     return room.authorizedTokens.has(authToken);
   }
@@ -288,10 +353,10 @@ class FastroomManager {
     return () => {
       room.subscribers.delete(listener);
       room.lastActivityAt = Date.now();
-      // If empty room (no subscribers and no files), delete immediately!
       if (room.subscribers.size === 0 && room.files.size === 0) {
         if (room.otpInterval) clearInterval(room.otpInterval);
         this.rooms.delete(normalizedId);
+        this.saveDiskState();
       }
     };
   }
@@ -320,6 +385,7 @@ class FastroomManager {
     if (room.subscribers.size === 0 && room.files.size === 0) {
       if (room.otpInterval) clearInterval(room.otpInterval);
       this.rooms.delete(normalizedId);
+      this.saveDiskState();
     }
   }
 
