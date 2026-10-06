@@ -167,9 +167,9 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
     return () => clearInterval(timer);
   }, []);
 
-  // 5. Smart background sync polling (every 2.5s) to guarantee Desktop sync
+  // 5. Fallback polling ONLY when SSE is disconnected (!isConnected)
   useEffect(() => {
-    if (!roomId || !enabled) return;
+    if (!roomId || !enabled || isConnected) return;
 
     const syncInterval = setInterval(async () => {
       try {
@@ -198,10 +198,10 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
       } catch {
         // Silent background catch
       }
-    }, 2500);
+    }, 4000);
 
     return () => clearInterval(syncInterval);
-  }, [roomId, enabled]);
+  }, [roomId, enabled, isConnected]);
 
   // 5. File upload via Base64 with client-side compression
   const uploadFile = useCallback(
