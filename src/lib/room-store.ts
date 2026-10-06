@@ -521,19 +521,26 @@ class FastroomManager {
 
   public async clearRoomAsync(roomId: string) {
     const normalizedId = roomId.trim().toLowerCase();
-    this.clearRoom(normalizedId);
 
     if (IS_REDIS_ENABLED) {
       try {
         const fileIds = await redisCommand<string[]>(['SMEMBERS', `fastroom:room:${normalizedId}:files`]);
-        if (Array.isArray(fileIds)) {
+        const delPromises: Promise<unknown>[] = [];
+        if (Array.isArray(fileIds) && fileIds.length > 0) {
           for (const id of fileIds) {
-            redisCommand(['DEL', `fastroom:file:${normalizedId}:${id}`]).catch(() => {});
+            delPromises.push(redisCommand(['DEL', `fastroom:file:${normalizedId}:${id}`]));
           }
         }
-        await redisCommand(['DEL', `fastroom:room:${normalizedId}:files`]);
-      } catch {}
+        delPromises.push(redisCommand(['DEL', `fastroom:room:${normalizedId}:files`]));
+        delPromises.push(redisCommand(['DEL', `fastroom:events:${normalizedId}`]));
+        delPromises.push(redisCommand(['DEL', `fastroom:auth:${normalizedId}`]));
+        await Promise.all(delPromises);
+      } catch (err) {
+        console.error('[Redis clearRoom error]', err);
+      }
     }
+
+    this.clearRoom(normalizedId);
   }
 
   public clearRoom(roomId: string) {

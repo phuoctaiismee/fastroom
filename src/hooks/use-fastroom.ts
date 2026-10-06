@@ -207,10 +207,6 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
         const data = await res.json();
         if (!Array.isArray(data.files)) return;
 
-        // Ignore empty responses — could be a cold serverless container
-        // that doesn't know about uploaded files yet.
-        if (data.files.length === 0) return;
-
         const store = useFastroomStore.getState();
         const currentFiles = store.files;
         const clientIds = new Set(currentFiles.map((f) => f.id));
@@ -218,8 +214,6 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
         for (const serverFile of data.files as SharedFile[]) {
           if (!clientIds.has(serverFile.id)) {
             // New file the client doesn't know about yet
-            store.addFile(serverFile);
-            // Only notify for files sent by someone else
             const isSelf = serverFile.senderDeviceId && serverFile.senderDeviceId === selfDeviceIdRef.current;
             if (!isSelf) {
               playNotificationSound();
@@ -227,20 +221,19 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
                 description: `${serverFile.senderDevice ? `Từ ${serverFile.senderDevice} • ` : ''}Tự động xóa sau 5 phút.`,
               });
             }
-          } else {
-            // File exists — only sync pin state changes
-            const clientFile = currentFiles.find((f) => f.id === serverFile.id);
-            if (clientFile && clientFile.isPinned !== serverFile.isPinned) {
-              store.updateFile(serverFile);
-            }
           }
         }
+
+        // Sync exact server active files (handles deletions & room clears)
+        store.setFiles(data.files);
       } catch {
         // Silent background catch
       }
-    }, 3000);
+    }, 2500);
 
-    return () => clearInterval(syncInterval);
+    return () => {
+      clearInterval(syncInterval);
+    };
   }, [roomId, enabled]);
 
   // 5. File upload via Base64 with client-side compression

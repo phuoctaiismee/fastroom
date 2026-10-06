@@ -106,27 +106,13 @@ export const useFastroomStore = create<FastroomState>((set, get) => ({
   setIsLoadingFiles: (isLoadingFiles: boolean) => set({ isLoadingFiles }),
 
   setFiles: (incomingFiles: SharedFile[]) => {
-    const currentFiles = get().files;
     const now = Date.now();
+    const validFiles = incomingFiles
+      .filter((f) => isAlive(f, now))
+      .sort((a, b) => b.createdAt - a.createdAt);
 
-    // Map existing files
-    const fileMap = new Map<string, SharedFile>();
-    for (const f of currentFiles) {
-      if (isAlive(f, now)) {
-        fileMap.set(f.id, f);
-      }
-    }
-
-    // Merge incoming files from server
-    for (const f of incomingFiles) {
-      if (isAlive(f, now)) {
-        fileMap.set(f.id, f);
-      }
-    }
-
-    const merged = Array.from(fileMap.values()).sort((a, b) => b.createdAt - a.createdAt);
-    persistFiles(get().roomId, merged);
-    set({ files: merged, isLoadingFiles: false });
+    persistFiles(get().roomId, validFiles);
+    set({ files: validFiles, isLoadingFiles: false });
   },
 
   addFile: (file: SharedFile) => {
