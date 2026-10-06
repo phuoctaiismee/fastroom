@@ -9,7 +9,7 @@ export async function GET(
 ) {
   try {
     const { roomId } = await context.params;
-    const status = fastroomManager.getRoomStatus(roomId);
+    const status = await fastroomManager.getRoomStatusAsync(roomId);
 
     return NextResponse.json({
       success: true,

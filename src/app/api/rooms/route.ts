@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
-    const rooms = fastroomManager.getAvailableRooms();
+    const rooms = await fastroomManager.getAvailableRoomsAsync();
     return NextResponse.json({
       success: true,
       count: rooms.length,

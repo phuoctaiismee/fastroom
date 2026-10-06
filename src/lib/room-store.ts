@@ -221,20 +221,31 @@ class FastroomManager {
     return room;
   }
 
-  public getAvailableRooms(): AvailableRoomSummary[] {
+  public async getAvailableRoomsAsync(): Promise<AvailableRoomSummary[]> {
     const list: AvailableRoomSummary[] = [];
 
     for (const [id, room] of this.rooms.entries()) {
-      const isAlive = room.subscribers.size > 0 || room.files.size > 0 || room.hasHost;
+      let fileCount = room.files.size;
+
+      if (IS_REDIS_ENABLED) {
+        try {
+          const redisFileIds = await redisCommand<string[]>(['SMEMBERS', `fastroom:room:${id}:files`]);
+          if (Array.isArray(redisFileIds)) {
+            fileCount = redisFileIds.length;
+          }
+        } catch {}
+      }
+
+      const isAlive = room.subscribers.size > 0 || fileCount > 0;
 
       if (isAlive) {
         list.push({
           roomId: id,
-          fileCount: room.files.size,
+          fileCount,
           clientsCount: room.subscribers.size,
           createdAt: room.createdAt,
           lastActivityAt: room.lastActivityAt,
-          hasHost: room.hasHost || room.subscribers.size > 0,
+          hasHost: room.subscribers.size > 0,
           isAvailable: true,
         });
       } else {
@@ -244,6 +255,71 @@ class FastroomManager {
     }
 
     return list.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+  }
+
+  public getAvailableRooms(): AvailableRoomSummary[] {
+    const list: AvailableRoomSummary[] = [];
+
+    for (const [id, room] of this.rooms.entries()) {
+      const isAlive = room.subscribers.size > 0 || room.files.size > 0;
+
+      if (isAlive) {
+        list.push({
+          roomId: id,
+          fileCount: room.files.size,
+          clientsCount: room.subscribers.size,
+          createdAt: room.createdAt,
+          lastActivityAt: room.lastActivityAt,
+          hasHost: room.subscribers.size > 0,
+          isAvailable: true,
+        });
+      } else {
+        if (room.otpInterval) clearInterval(room.otpInterval);
+        this.rooms.delete(id);
+      }
+    }
+
+    return list.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+  }
+
+  public async getRoomStatusAsync(roomId: string): Promise<{
+    roomId: string;
+    exists: boolean;
+    isAvailable: boolean;
+    fileCount: number;
+    clientsCount: number;
+    hasHost: boolean;
+  }> {
+    const normalizedId = roomId.trim().toLowerCase();
+    this.loadDiskState(normalizedId);
+    const room = this.rooms.get(normalizedId);
+
+    let fileCount = room ? room.files.size : 0;
+    if (IS_REDIS_ENABLED) {
+      try {
+        const redisFileIds = await redisCommand<string[]>(['SMEMBERS', `fastroom:room:${normalizedId}:files`]);
+        if (Array.isArray(redisFileIds)) {
+          fileCount = redisFileIds.length;
+        }
+      } catch {}
+    }
+
+    const clientsCount = room ? room.subscribers.size : 0;
+    const isAvailable = clientsCount > 0 || fileCount > 0;
+
+    if (!isAvailable && room) {
+      if (room.otpInterval) clearInterval(room.otpInterval);
+      this.rooms.delete(normalizedId);
+    }
+
+    return {
+      roomId: normalizedId,
+      exists: isAvailable,
+      isAvailable,
+      fileCount,
+      clientsCount,
+      hasHost: clientsCount > 0,
+    };
   }
 
   public getRoomStatus(roomId: string): {
@@ -268,7 +344,12 @@ class FastroomManager {
       };
     }
 
-    const isAvailable = room.subscribers.size > 0 || room.files.size > 0 || room.hasHost;
+    const isAvailable = room.subscribers.size > 0 || room.files.size > 0;
+
+    if (!isAvailable) {
+      if (room.otpInterval) clearInterval(room.otpInterval);
+      this.rooms.delete(normalizedId);
+    }
 
     return {
       roomId: normalizedId,
@@ -276,7 +357,7 @@ class FastroomManager {
       isAvailable,
       fileCount: room.files.size,
       clientsCount: room.subscribers.size,
-      hasHost: room.hasHost || room.subscribers.size > 0,
+      hasHost: room.subscribers.size > 0,
     };
   }
 
@@ -371,15 +452,20 @@ class FastroomManager {
     return () => {
       room.subscribers.delete(listener);
       room.lastActivityAt = Date.now();
-      // Don't delete the room immediately — client may be reconnecting.
-      // Schedule a deferred cleanup after 30s, only if truly empty.
+
+      // When no subscribers remain, reset hasHost so the room can be cleaned up
+      if (room.subscribers.size === 0) {
+        room.hasHost = false;
+        this.saveDiskState();
+      }
+
+      // Deferred cleanup: delete room after 30s if still empty (no reconnection)
       setTimeout(() => {
         const current = this.rooms.get(normalizedId);
         if (
           current &&
           current.subscribers.size === 0 &&
-          current.files.size === 0 &&
-          !current.hasHost
+          current.files.size === 0
         ) {
           if (current.otpInterval) clearInterval(current.otpInterval);
           this.rooms.delete(normalizedId);
