@@ -4,7 +4,7 @@ import { useEffect, useCallback, useRef } from 'react';
 import { RoomEvent } from '@/lib/room-store';
 import { useFastroomStore } from '@/stores/room-store';
 import { useDeviceStore } from '@/stores/device-store';
-import { playNotificationSound } from '@/lib/client-utils';
+import { playNotificationSound, compressImageFile } from '@/lib/client-utils';
 import { toast } from 'sonner';
 
 interface UseFastroomOptions {
@@ -165,7 +165,7 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
     return () => clearInterval(timer);
   }, []);
 
-  // 5. File upload via Base64
+  // 5. File upload via Base64 with client-side compression
   const uploadFile = useCallback(
     async (file: File, customSenderDevice?: string) => {
       if (!roomId) return;
@@ -175,19 +175,14 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
       const senderDevice = customSenderDevice || deviceState.getEffectiveName();
 
       try {
-        const reader = new FileReader();
-        const base64Promise = new Promise<string>((resolve, reject) => {
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = reject;
-        });
-        reader.readAsDataURL(file);
-        const dataUrl = await base64Promise;
+        // Compress image before sending base64 over the wire
+        const { dataUrl, size, name, type } = await compressImageFile(file);
 
         const payload = {
           id: `file_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-          name: file.name,
-          type: file.type || 'image/png',
-          size: file.size,
+          name,
+          type,
+          size,
           dataUrl,
           senderDevice,
           senderName: senderDevice,
@@ -203,6 +198,11 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
         if (!res.ok) {
           const err = await res.json();
           throw new Error(err.error || 'Upload failed');
+        }
+
+        const data = await res.json();
+        if (data.file) {
+          useFastroomStore.getState().addFile(data.file);
         }
 
         toast.success('Đã tải ảnh lên phòng thành công!');

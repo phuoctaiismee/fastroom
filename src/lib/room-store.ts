@@ -417,6 +417,5 @@ declare global {
 }
 
 export const fastroomManager = globalThis.__fastroomManager ?? new FastroomManager();
-if (process.env.NODE_ENV !== 'production') {
-  globalThis.__fastroomManager = fastroomManager;
-}
+globalThis.__fastroomManager = fastroomManager;
+

@@ -43,14 +43,7 @@ export async function POST(
 
     return NextResponse.json({
       success: true,
-      file: {
-        id: file.id,
-        name: file.name,
-        size: file.size,
-        type: file.type,
-        createdAt: file.createdAt,
-        expiresAt: file.expiresAt,
-      },
+      file,
     });
   } catch (error) {
     console.error('Error handling upload:', error);

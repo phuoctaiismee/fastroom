@@ -204,3 +204,87 @@ export function formatTimeRemaining(ms: number): string {
   const seconds = totalSeconds % 60;
   return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
+
+/**
+ * Fast client-side image compression & resizing for mobile photos before upload.
+ * Reduces 10MB mobile camera photos down to ~300KB-600KB instantly.
+ */
+export async function compressImageFile(
+  file: File,
+  maxDimension = 2048,
+  quality = 0.85
+): Promise<{ dataUrl: string; size: number; name: string; type: string }> {
+  // If file is non-image, read directly without processing
+  if (!file.type.startsWith('image/')) {
+    const reader = new FileReader();
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+    });
+    return { dataUrl, size: file.size, name: file.name, type: file.type || 'application/octet-stream' };
+  }
+
+  // If small image (< 800KB) and not SVG/GIF, read directly
+  if (file.size <= 800 * 1024 && (file.type.includes('svg') || file.type.includes('gif'))) {
+    const reader = new FileReader();
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+    });
+    return { dataUrl, size: file.size, name: file.name, type: file.type };
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let width = img.naturalWidth || img.width;
+        let height = img.naturalHeight || img.height;
+
+        // Downscale large images (e.g. 4000x3000 down to max 2048px)
+        if (width > maxDimension || height > maxDimension) {
+          if (width > height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          // Fallback to original data URL if canvas fails
+          const dataUrl = e.target?.result as string;
+          resolve({ dataUrl, size: file.size, name: file.name, type: file.type });
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const mimeType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+        const dataUrl = canvas.toDataURL(mimeType, quality);
+        const approxSize = Math.round((dataUrl.length * 3) / 4);
+
+        resolve({
+          dataUrl,
+          size: approxSize,
+          name: file.name,
+          type: mimeType,
+        });
+      };
+      img.onerror = () => {
+        const dataUrl = e.target?.result as string;
+        resolve({ dataUrl, size: file.size, name: file.name, type: file.type });
+      };
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
