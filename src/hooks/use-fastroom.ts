@@ -58,7 +58,8 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
     const otpTask = isHost
       ? (async () => {
           try {
-            const res = await fetch(`${base}/otp?role=host`, { cache: 'no-store' });
+            const devId = useDeviceStore.getState().deviceId;
+            const res = await fetch(`${base}/otp?role=host&deviceId=${encodeURIComponent(devId)}`, { cache: 'no-store' });
             if (res.ok) {
               const otpData = await res.json();
               useFastroomStore.getState().setOtp(otpData.otp, otpData.remainingSeconds);
@@ -83,7 +84,8 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
   useEffect(() => {
     if (!roomId || !enabled) return;
 
-    const url = `/api/room/${encodeURIComponent(roomId)}/events${isHost ? '?role=host' : ''}`;
+    const devId = useDeviceStore.getState().deviceId;
+    const url = `/api/room/${encodeURIComponent(roomId)}/events?${isHost ? 'role=host&' : ''}deviceId=${encodeURIComponent(devId)}`;
     const eventSource = new EventSource(url);
     eventSourceRef.current = eventSource;
 
@@ -171,7 +173,8 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
   useEffect(() => {
     if (isHost && roomId && enabled && otpRemainingSeconds <= 1) {
       const base = `/api/room/${encodeURIComponent(roomId)}`;
-      fetch(`${base}/otp?role=host`, { cache: 'no-store' })
+      const devId = useDeviceStore.getState().deviceId;
+      fetch(`${base}/otp?role=host&deviceId=${encodeURIComponent(devId)}`, { cache: 'no-store' })
         .then((res) => res.json())
         .then((otpData) => {
           if (otpData.otp) {

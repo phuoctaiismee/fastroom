@@ -133,6 +133,11 @@ export default function HomePage() {
     try {
       const updated = [cleanRoom, ...recentRooms.filter((r) => r !== cleanRoom)].slice(0, 4);
       localStorage.setItem('fastroom_recent_rooms', JSON.stringify(updated));
+      // Mark create intent if room is not online yet
+      const isOnline = availableRooms.some((r) => r.roomId === cleanRoom);
+      if (!isOnline) {
+        sessionStorage.setItem(`fastroom_create_intent_${cleanRoom}`, 'true');
+      }
     } catch {
       // Ignore
     }

@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Clock, Image as ImageIcon, Loader2 } from 'lucide-react';
 
 import { OtpVerificationGate } from '@/components/OtpVerificationGate';
+import { useDeviceStore } from '@/stores/device-store';
 
 interface RoomViewProps {
   roomId: string;
@@ -21,57 +22,55 @@ export function RoomView({ roomId }: RoomViewProps) {
   const [isQrOpen, setIsQrOpen] = useState(false);
   const [lightboxFile, setLightboxFile] = useState<SharedFile | null>(null);
 
-  // Synchronous client-side lazy initialization to prevent state flips / duplicate SSE connections
-  const [isMobileDevice, setIsMobileDevice] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    return /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
-  });
+  const deviceId = useDeviceStore((s) => s.deviceId);
 
-  const [isVerified, setIsVerified] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return true;
-    const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
-    if (!isMobile) return true;
-    return !!sessionStorage.getItem(`fastroom_auth_${roomId}`);
-  });
-
-  const [checkingAuth, setCheckingAuth] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return true;
-    const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
-    if (!isMobile) return false;
-    return !sessionStorage.getItem(`fastroom_auth_${roomId}`);
-  });
-
+  const [isHost, setIsHost] = useState<boolean>(false);
+  const [isVerified, setIsVerified] = useState<boolean>(false);
+  const [checkingAuth, setCheckingAuth] = useState<boolean>(true);
   const [isRoomAvailable, setIsRoomAvailable] = useState<boolean | null>(null);
 
   useEffect(() => {
-    const isMobile = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
-    setIsMobileDevice(isMobile);
+    if (!roomId || !deviceId) return;
 
-    if (isMobile) {
-      const stored = sessionStorage.getItem(`fastroom_auth_${roomId}`);
-      if (stored) {
-        setIsVerified(true);
-        setCheckingAuth(false);
-      } else {
-        setIsVerified(false);
-        // Check if room exists and is active on Desktop
-        fetch(`/api/room/${encodeURIComponent(roomId)}/status`)
-          .then((res) => res.json())
-          .then((data) => {
-            setIsRoomAvailable(!!data.isAvailable);
-            setCheckingAuth(false);
-          })
-          .catch(() => {
-            setIsRoomAvailable(false);
-            setCheckingAuth(false);
-          });
+    let hasCreateIntent = false;
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        hasCreateIntent = sessionStorage.getItem(`fastroom_create_intent_${roomId}`) === 'true';
+        if (hasCreateIntent) {
+          sessionStorage.removeItem(`fastroom_create_intent_${roomId}`);
+        }
       }
-    } else {
-      // Desktop is the room host / display
-      setIsVerified(true);
-      setCheckingAuth(false);
-    }
-  }, [roomId]);
+    } catch {}
+
+    const statusUrl = `/api/room/${encodeURIComponent(roomId)}/status?deviceId=${encodeURIComponent(deviceId)}${hasCreateIntent ? '&claimHost=true' : ''}`;
+
+    fetch(statusUrl)
+      .then((res) => res.json())
+      .then((data) => {
+        setIsRoomAvailable(!!data.isAvailable);
+        if (data.isHost) {
+          setIsHost(true);
+          setIsVerified(true);
+          setCheckingAuth(false);
+        } else {
+          setIsHost(false);
+          const storedAuth = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(`fastroom_auth_${roomId}`) : null;
+          if (storedAuth) {
+            setIsVerified(true);
+          } else {
+            setIsVerified(false);
+          }
+          setCheckingAuth(false);
+        }
+      })
+      .catch(() => {
+        setIsHost(false);
+        setIsRoomAvailable(false);
+        const storedAuth = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(`fastroom_auth_${roomId}`) : null;
+        setIsVerified(!!storedAuth);
+        setCheckingAuth(false);
+      });
+  }, [roomId, deviceId]);
 
   const {
     files,
@@ -90,7 +89,7 @@ export function RoomView({ roomId }: RoomViewProps) {
   } = useFastroom({
     roomId,
     enabled: isVerified && !checkingAuth,
-    isHost: !isMobileDevice,
+    isHost,
   });
 
   if (checkingAuth) {
@@ -122,6 +121,7 @@ export function RoomView({ roomId }: RoomViewProps) {
         currentOtp={currentOtp}
         otpRemainingSeconds={otpRemainingSeconds}
         connectedPeers={connectedPeers}
+        isHost={isHost}
         onOpenQr={() => setIsQrOpen(true)}
         onClearRoom={clearRoom}
       />

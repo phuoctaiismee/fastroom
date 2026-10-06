@@ -16,6 +16,7 @@ interface RoomState {
   createdAt: number;
   lastActivityAt: number;
   hasHost: boolean;
+  hostId?: string | null;
 }
 
 interface SerializedRoom {
@@ -28,6 +29,7 @@ interface SerializedRoom {
   createdAt: number;
   lastActivityAt: number;
   hasHost: boolean;
+  hostId?: string | null;
 }
 
 const OTP_SECRET = 'fastroom_secret_otp_salt_2026';
@@ -106,6 +108,7 @@ class FastroomManager {
           createdAt: room.createdAt,
           lastActivityAt: room.lastActivityAt,
           hasHost: room.hasHost,
+          hostId: room.hostId || null,
         };
       }
 
@@ -148,11 +151,15 @@ class FastroomManager {
             createdAt: savedRoom.createdAt || now,
             lastActivityAt: savedRoom.lastActivityAt || now,
             hasHost: savedRoom.hasHost || false,
+            hostId: savedRoom.hostId || null,
           };
           this.rooms.set(normalizedId, room);
         } else {
           if (savedRoom.hasHost) {
             room.hasHost = true;
+          }
+          if (savedRoom.hostId) {
+            room.hostId = savedRoom.hostId;
           }
           if (Array.isArray(savedRoom.authorizedTokens)) {
             for (const tok of savedRoom.authorizedTokens) {
@@ -184,7 +191,7 @@ class FastroomManager {
     }
   }
 
-  public getOrCreateRoom(roomId: string, isHost = false): RoomState {
+  public getOrCreateRoom(roomId: string, isHost = false, hostId?: string | null): RoomState {
     const normalizedId = roomId.trim().toLowerCase();
     this.loadDiskState(normalizedId);
     let room = this.rooms.get(normalizedId);
@@ -203,7 +210,8 @@ class FastroomManager {
         authorizedTokens: new Set(),
         createdAt: now,
         lastActivityAt: now,
-        hasHost: isHost,
+        hasHost: isHost || !!hostId,
+        hostId: hostId || null,
       };
 
       this.rooms.set(normalizedId, room);
@@ -213,7 +221,15 @@ class FastroomManager {
       room.currentOtp = otpData.currentOtp;
       room.prevOtp = otpData.prevOtp;
       room.otpExpiresAt = otpData.expiresAt;
-      if (isHost) {
+
+      if (!room.hostId && hostId) {
+        room.hostId = hostId;
+        room.hasHost = true;
+        this.saveDiskState();
+      } else if (isHost) {
+        if (hostId && !room.hostId) {
+          room.hostId = hostId;
+        }
         room.hasHost = true;
         this.saveDiskState();
       }
@@ -229,14 +245,12 @@ class FastroomManager {
 
       if (IS_REDIS_ENABLED) {
         try {
-          const redisFileIds = await redisCommand<string[]>(['SMEMBERS', `fastroom:room:${id}:files`]);
-          if (Array.isArray(redisFileIds)) {
-            fileCount = redisFileIds.length;
-          }
+          const liveCount = await countLiveRedisFiles(id);
+          fileCount = liveCount;
         } catch {}
       }
 
-      const isAlive = room.subscribers.size > 0 || fileCount > 0;
+      const isAlive = room.subscribers.size > 0 || fileCount > 0 || !!room.hostId;
 
       if (isAlive) {
         list.push({
@@ -245,7 +259,7 @@ class FastroomManager {
           clientsCount: room.subscribers.size,
           createdAt: room.createdAt,
           lastActivityAt: room.lastActivityAt,
-          hasHost: room.subscribers.size > 0,
+          hasHost: room.hasHost || !!room.hostId,
           isAvailable: true,
         });
       } else {
@@ -261,7 +275,7 @@ class FastroomManager {
     const list: AvailableRoomSummary[] = [];
 
     for (const [id, room] of this.rooms.entries()) {
-      const isAlive = room.subscribers.size > 0 || room.files.size > 0;
+      const isAlive = room.subscribers.size > 0 || room.files.size > 0 || !!room.hostId;
 
       if (isAlive) {
         list.push({
@@ -270,7 +284,7 @@ class FastroomManager {
           clientsCount: room.subscribers.size,
           createdAt: room.createdAt,
           lastActivityAt: room.lastActivityAt,
-          hasHost: room.subscribers.size > 0,
+          hasHost: room.hasHost || !!room.hostId,
           isAvailable: true,
         });
       } else {
@@ -282,57 +296,100 @@ class FastroomManager {
     return list.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
   }
 
-  public async getRoomStatusAsync(roomId: string): Promise<{
+  public async getRoomStatusAsync(
+    roomId: string,
+    deviceId?: string | null,
+    claimHost = false
+  ): Promise<{
     roomId: string;
     exists: boolean;
     isAvailable: boolean;
     fileCount: number;
     clientsCount: number;
     hasHost: boolean;
+    isHost: boolean;
+    hostId: string | null;
   }> {
     const normalizedId = roomId.trim().toLowerCase();
     this.loadDiskState(normalizedId);
-    const room = this.rooms.get(normalizedId);
+    let room = this.rooms.get(normalizedId);
 
-    let fileCount = room ? room.files.size : 0;
     if (IS_REDIS_ENABLED) {
       try {
-        const redisFileIds = await redisCommand<string[]>(['SMEMBERS', `fastroom:room:${normalizedId}:files`]);
-        if (Array.isArray(redisFileIds)) {
-          fileCount = redisFileIds.length;
+        const redisHostId = await redisCommand<string>(['GET', `fastroom:room:${normalizedId}:hostId`]);
+        if (redisHostId && room) {
+          room.hostId = redisHostId;
         }
       } catch {}
     }
 
-    const clientsCount = room ? room.subscribers.size : 0;
-    const isAvailable = clientsCount > 0 || fileCount > 0;
+    // If room does not exist yet and caller wants to claim host or provided deviceId for a room creation
+    if (!room && (claimHost || deviceId)) {
+      room = this.getOrCreateRoom(normalizedId, true, deviceId);
+      if (IS_REDIS_ENABLED && deviceId) {
+        redisCommand(['SET', `fastroom:room:${normalizedId}:hostId`, deviceId, 'EX', 86400]).catch(() => {});
+      }
+    }
 
-    if (!isAvailable && room) {
-      if (room.otpInterval) clearInterval(room.otpInterval);
-      this.rooms.delete(normalizedId);
+    let fileCount = room ? room.files.size : 0;
+    if (IS_REDIS_ENABLED) {
+      try {
+        const liveCount = await countLiveRedisFiles(normalizedId);
+        fileCount = liveCount;
+      } catch {}
+    }
+
+    const clientsCount = room ? room.subscribers.size : 0;
+    const exists = !!room && (clientsCount > 0 || fileCount > 0 || !!room.hostId);
+    const isAvailable = exists;
+
+    let isHost = false;
+    if (room && deviceId) {
+      if (!room.hostId && claimHost) {
+        room.hostId = deviceId;
+        room.hasHost = true;
+        this.saveDiskState();
+        if (IS_REDIS_ENABLED) {
+          redisCommand(['SET', `fastroom:room:${normalizedId}:hostId`, deviceId, 'EX', 86400]).catch(() => {});
+        }
+      }
+      isHost = room.hostId === deviceId;
     }
 
     return {
       roomId: normalizedId,
-      exists: isAvailable,
+      exists,
       isAvailable,
       fileCount,
       clientsCount,
-      hasHost: clientsCount > 0,
+      hasHost: !!room?.hostId || clientsCount > 0,
+      isHost,
+      hostId: room?.hostId || null,
     };
   }
 
-  public getRoomStatus(roomId: string): {
+  public getRoomStatus(
+    roomId: string,
+    deviceId?: string | null,
+    claimHost = false
+  ): {
     roomId: string;
     exists: boolean;
     isAvailable: boolean;
     fileCount: number;
     clientsCount: number;
     hasHost: boolean;
+    isHost: boolean;
+    hostId: string | null;
   } {
     const normalizedId = roomId.trim().toLowerCase();
     this.loadDiskState(normalizedId);
-    const room = this.rooms.get(normalizedId);
+    let room = this.rooms.get(normalizedId);
+
+    if (!room && (claimHost || deviceId)) {
+      room = this.getOrCreateRoom(normalizedId, true, deviceId);
+    }
+
     if (!room) {
       return {
         roomId: normalizedId,
@@ -341,23 +398,33 @@ class FastroomManager {
         fileCount: 0,
         clientsCount: 0,
         hasHost: false,
+        isHost: false,
+        hostId: null,
       };
     }
 
-    const isAvailable = room.subscribers.size > 0 || room.files.size > 0;
+    const exists = room.subscribers.size > 0 || room.files.size > 0 || !!room.hostId;
+    const isAvailable = exists;
 
-    if (!isAvailable) {
-      if (room.otpInterval) clearInterval(room.otpInterval);
-      this.rooms.delete(normalizedId);
+    let isHost = false;
+    if (deviceId) {
+      if (!room.hostId && claimHost) {
+        room.hostId = deviceId;
+        room.hasHost = true;
+        this.saveDiskState();
+      }
+      isHost = room.hostId === deviceId;
     }
 
     return {
       roomId: normalizedId,
-      exists: isAvailable,
+      exists,
       isAvailable,
       fileCount: room.files.size,
       clientsCount: room.subscribers.size,
-      hasHost: room.subscribers.size > 0,
+      hasHost: !!room.hostId || room.subscribers.size > 0,
+      isHost,
+      hostId: room.hostId || null,
     };
   }
 
@@ -816,6 +883,54 @@ export async function fetchRedisEvents(roomId: string, start = 0): Promise<RoomE
       }
     })
     .filter((e): e is RoomEvent => e !== null);
+}
+
+/**
+ * Count files that ACTUALLY exist in Redis (not just IDs in the Set).
+ * When a file expires via Redis TTL, its data key is deleted but its ID stays in
+ * the SMEMBERS Set. This verifies each ID and removes stale phantom entries.
+ */
+export async function countLiveRedisFiles(roomId: string): Promise<number> {
+  if (!IS_REDIS_ENABLED) return 0;
+  const normalizedId = roomId.trim().toLowerCase();
+  const setKey = `fastroom:room:${normalizedId}:files`;
+
+  const fileIds = await redisCommand<string[]>(['SMEMBERS', setKey]);
+  if (!Array.isArray(fileIds) || fileIds.length === 0) return 0;
+
+  const now = Date.now();
+  let liveCount = 0;
+  const staleIds: string[] = [];
+
+  for (const id of fileIds) {
+    const raw = await redisCommand<string>(['GET', `fastroom:file:${normalizedId}:${id}`]);
+    if (!raw) {
+      staleIds.push(id);
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(raw) as { expiresAt?: number; isPinned?: boolean };
+      if (parsed.isPinned || (parsed.expiresAt && parsed.expiresAt > now)) {
+        liveCount++;
+      } else {
+        staleIds.push(id);
+      }
+    } catch {
+      staleIds.push(id);
+    }
+  }
+
+  // Clean up stale IDs from the Set (fire-and-forget)
+  if (staleIds.length > 0) {
+    if (staleIds.length === fileIds.length) {
+      // All stale — delete the whole set
+      redisCommand(['DEL', setKey]).catch(() => {});
+    } else {
+      redisCommand(['SREM', setKey, ...staleIds]).catch(() => {});
+    }
+  }
+
+  return liveCount;
 }
 
 declare global {

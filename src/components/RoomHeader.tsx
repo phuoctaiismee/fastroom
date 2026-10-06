@@ -36,6 +36,7 @@ interface RoomHeaderProps {
   currentOtp?: string;
   otpRemainingSeconds?: number;
   connectedPeers?: ConnectedPeer[];
+  isHost?: boolean;
   onOpenQr: () => void;
   onClearRoom: () => void;
 }
@@ -47,6 +48,7 @@ export function RoomHeader({
   currentOtp,
   otpRemainingSeconds,
   connectedPeers = [],
+  isHost = false,
   onOpenQr,
   onClearRoom,
 }: RoomHeaderProps) {
@@ -138,14 +140,16 @@ export function RoomHeader({
 
         {/* Right Controls Section */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {/* OTP Badge (Desktop & Tablet >= md) */}
-          <div className="hidden md:flex items-center">
-            <OtpBadge
-              roomId={roomId}
-              currentOtp={currentOtp}
-              remainingSeconds={otpRemainingSeconds}
-            />
-          </div>
+          {/* OTP Badge (Desktop & Tablet >= md, for Host only) */}
+          {isHost && (
+            <div className="hidden md:flex items-center">
+              <OtpBadge
+                roomId={roomId}
+                currentOtp={currentOtp}
+                remainingSeconds={otpRemainingSeconds}
+              />
+            </div>
+          )}
 
           {/* Connected Peers Pill (Tablet & Desktop >= sm) */}
           {connectedPeers.length > 0 && (
@@ -279,8 +283,8 @@ export function RoomHeader({
                   Phòng #{roomId}
                 </DropdownMenuLabel>
 
-                {/* Mobile OTP Copy option */}
-                {currentOtp && (
+                {/* Mobile OTP Copy option (Host only) */}
+                {isHost && currentOtp && (
                   <DropdownMenuItem
                     onClick={handleCopyOtp}
                     className="cursor-pointer text-xs flex items-center justify-between py-2"
