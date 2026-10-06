@@ -30,19 +30,24 @@ export function RoomView({ roomId }: RoomViewProps) {
   const [isRoomAvailable, setIsRoomAvailable] = useState<boolean | null>(null);
 
   useEffect(() => {
-    if (!roomId || !deviceId) return;
+    if (!roomId) return;
+    const currentDeviceId = deviceId || (typeof window !== 'undefined' ? localStorage.getItem('fastroom_device_id_raw') : '');
 
     let hasCreateIntent = false;
     try {
-      if (typeof sessionStorage !== 'undefined') {
-        hasCreateIntent = sessionStorage.getItem(`fastroom_create_intent_${roomId}`) === 'true';
+      if (typeof window !== 'undefined') {
+        hasCreateIntent =
+          sessionStorage.getItem(`fastroom_create_intent_${roomId}`) === 'true' ||
+          localStorage.getItem(`fastroom_create_intent_${roomId}`) === 'true';
+
         if (hasCreateIntent) {
           sessionStorage.removeItem(`fastroom_create_intent_${roomId}`);
+          localStorage.removeItem(`fastroom_create_intent_${roomId}`);
         }
       }
     } catch {}
 
-    const statusUrl = `/api/room/${encodeURIComponent(roomId)}/status?deviceId=${encodeURIComponent(deviceId)}${hasCreateIntent ? '&claimHost=true' : ''}`;
+    const statusUrl = `/api/room/${encodeURIComponent(roomId)}/status?deviceId=${encodeURIComponent(currentDeviceId || '')}${hasCreateIntent ? '&claimHost=true' : ''}`;
 
     fetch(statusUrl)
       .then((res) => res.json())
@@ -54,7 +59,10 @@ export function RoomView({ roomId }: RoomViewProps) {
           setCheckingAuth(false);
         } else {
           setIsHost(false);
-          const storedAuth = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(`fastroom_auth_${roomId}`) : null;
+          const storedAuth =
+            typeof window !== 'undefined'
+              ? sessionStorage.getItem(`fastroom_auth_${roomId}`) || localStorage.getItem(`fastroom_auth_${roomId}`)
+              : null;
           if (storedAuth) {
             setIsVerified(true);
           } else {
@@ -66,7 +74,10 @@ export function RoomView({ roomId }: RoomViewProps) {
       .catch(() => {
         setIsHost(false);
         setIsRoomAvailable(false);
-        const storedAuth = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(`fastroom_auth_${roomId}`) : null;
+        const storedAuth =
+          typeof window !== 'undefined'
+            ? sessionStorage.getItem(`fastroom_auth_${roomId}`) || localStorage.getItem(`fastroom_auth_${roomId}`)
+            : null;
         setIsVerified(!!storedAuth);
         setCheckingAuth(false);
       });

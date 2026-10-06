@@ -12,6 +12,28 @@ function generateShortDeviceId(): string {
   return id;
 }
 
+export function getOrCreateDeviceId(): string {
+  if (typeof window === 'undefined') return 'dev-server';
+  try {
+    const raw = localStorage.getItem('fastroom_device_identity');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.state?.deviceId) {
+        return parsed.state.deviceId;
+      }
+    }
+  } catch {}
+
+  let id = localStorage.getItem('fastroom_device_id_raw');
+  if (!id) {
+    id = generateShortDeviceId();
+    try {
+      localStorage.setItem('fastroom_device_id_raw', id);
+    } catch {}
+  }
+  return id;
+}
+
 export function detectDeviceName(): string {
   if (typeof navigator === 'undefined') return 'Web Browser';
 
@@ -52,7 +74,7 @@ interface DeviceState {
 export const useDeviceStore = create<DeviceState>()(
   persist(
     (set, get) => ({
-      deviceId: generateShortDeviceId(),
+      deviceId: typeof window !== 'undefined' ? getOrCreateDeviceId() : generateShortDeviceId(),
       deviceName: typeof window !== 'undefined' ? detectDeviceName() : 'Device',
       nickname: '',
       setNickname: (nickname: string) => set({ nickname: nickname.trim() }),

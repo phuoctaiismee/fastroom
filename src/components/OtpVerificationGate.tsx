@@ -55,9 +55,11 @@ export function OtpVerificationGate({
         throw new Error(data.error || 'Mã OTP không chính xác');
       }
 
-      // Store auth session
+      // Store auth session for current tab and shared tabs
       if (typeof window !== 'undefined') {
-        sessionStorage.setItem(`fastroom_auth_${roomId}`, data.authToken || 'authorized');
+        const token = data.authToken || 'authorized';
+        sessionStorage.setItem(`fastroom_auth_${roomId}`, token);
+        localStorage.setItem(`fastroom_auth_${roomId}`, token);
       }
 
       confetti({
