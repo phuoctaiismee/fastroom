@@ -9,7 +9,7 @@ import {
   InputOTPSlot,
   InputOTPSeparator,
 } from '@/components/ui/input-otp';
-import { ShieldCheck, Lock, Smartphone, ArrowRight, Loader2, Sparkles, Radio } from 'lucide-react';
+import { ShieldCheck, Lock, Smartphone, ArrowRight, Loader2, Sparkles, Radio, MonitorOff } from 'lucide-react';
 import { toast } from 'sonner';
 import confetti from 'canvas-confetti';
 import { AvailableRoomsSheet } from '@/components/AvailableRoomsSheet';
@@ -20,12 +20,14 @@ interface OtpVerificationGateProps {
   roomId: string;
   onVerified: () => void;
   isVerified: boolean;
+  roomMayBeOffline?: boolean;
 }
 
 export function OtpVerificationGate({
   roomId,
   onVerified,
   isVerified,
+  roomMayBeOffline = false,
 }: OtpVerificationGateProps) {
   const [otpValue, setOtpValue] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -103,6 +105,16 @@ export function OtpVerificationGate({
             Nhìn lên màn hình <strong>Desktop</strong> và nhập mã OTP 6 chữ số đang đếm ngược:
           </p>
         </div>
+
+        {/* Offline Warning Banner */}
+        {roomMayBeOffline && (
+          <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-400 flex items-start gap-2 text-left">
+            <MonitorOff className="size-4 shrink-0 mt-0.5" />
+            <span>
+              Phòng <strong className="font-mono">#{roomId}</strong> có thể chưa mở trên Desktop. Nếu bạn có mã OTP hợp lệ, vẫn có thể thử nhập.
+            </span>
+          </div>
+        )}
 
         {/* 6-Digit OTP Input */}
         <div className="flex flex-col items-center justify-center py-1 sm:py-2 space-y-3">

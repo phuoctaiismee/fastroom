@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useFastroom } from '@/hooks/use-fastroom';
 import { SharedFile } from '@/lib/room-store';
 import { RoomHeader } from '@/components/RoomHeader';
@@ -9,24 +9,9 @@ import { FileCard } from '@/components/FileCard';
 import { QRCodeModal } from '@/components/QRCodeModal';
 import { ImageLightbox } from '@/components/ImageLightbox';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
-import {
-  Smartphone,
-  ShieldCheck,
-  Zap,
-  Info,
-  Clock,
-  QrCode,
-  Image as ImageIcon,
-  MonitorOff,
-  Radio,
-  Loader2,
-} from 'lucide-react';
+import { Clock, Image as ImageIcon, Loader2 } from 'lucide-react';
 
 import { OtpVerificationGate } from '@/components/OtpVerificationGate';
-import { AvailableRoomsSheet } from '@/components/AvailableRoomsSheet';
-import { useEffect } from 'react';
 
 interface RoomViewProps {
   roomId: string;
@@ -57,7 +42,6 @@ export function RoomView({ roomId }: RoomViewProps) {
   });
 
   const [isRoomAvailable, setIsRoomAvailable] = useState<boolean | null>(null);
-  const [isAvailableSheetOpen, setIsAvailableSheetOpen] = useState(false);
 
   useEffect(() => {
     const isMobile = typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
@@ -118,74 +102,12 @@ export function RoomView({ roomId }: RoomViewProps) {
   }
 
   if (!isVerified) {
-    // If the room is NOT available on Desktop
-    if (isRoomAvailable === false) {
-      return (
-        <>
-          <div className="h-dvh w-full flex items-center justify-center p-4 bg-background overflow-hidden">
-            <Card className="w-full max-w-sm sm:max-w-md p-6 bg-card border-border shadow-2xl space-y-5 text-center">
-              <div className="mx-auto w-14 h-14 rounded-2xl bg-amber-500/10 flex items-center justify-center text-amber-500 shadow-inner">
-                <MonitorOff className="size-7" />
-              </div>
-
-              <div className="space-y-1.5">
-                <h2 className="text-lg sm:text-xl font-bold tracking-tight text-foreground flex items-center justify-center gap-1.5">
-                  Phòng chưa mở trên máy tính
-                </h2>
-                <p className="text-xs sm:text-sm text-muted-foreground">
-                  Phòng <strong className="font-mono text-foreground">#{roomId}</strong> hiện chưa có máy tính nào mở để lấy mã OTP hoặc phòng đã hết hạn.
-                </p>
-              </div>
-
-              <div className="space-y-2 pt-1">
-                <Button
-                  onClick={() => setIsAvailableSheetOpen(true)}
-                  className="w-full h-11 text-xs sm:text-sm font-semibold gap-2 cursor-pointer"
-                  variant="default"
-                >
-                  <Radio className="size-4 text-emerald-400" />
-                  <span>Xem các phòng đang mở</span>
-                </Button>
-
-                <Button
-                  onClick={() => {
-                    if (typeof window !== 'undefined') {
-                      sessionStorage.setItem(`fastroom_auth_${roomId}`, 'host');
-                    }
-                    setIsVerified(true);
-                  }}
-                  className="w-full h-10 text-xs font-medium gap-1.5 text-muted-foreground hover:text-foreground cursor-pointer"
-                  variant="outline"
-                >
-                  <span>Tự tạo & làm chủ phòng này trên điện thoại</span>
-                </Button>
-
-                <Button
-                  onClick={() => {
-                    if (typeof window !== 'undefined') window.location.href = '/';
-                  }}
-                  className="w-full h-9 text-xs text-muted-foreground cursor-pointer"
-                  variant="ghost"
-                >
-                  Về trang chủ
-                </Button>
-              </div>
-            </Card>
-          </div>
-
-          <AvailableRoomsSheet
-            open={isAvailableSheetOpen}
-            onOpenChange={setIsAvailableSheetOpen}
-          />
-        </>
-      );
-    }
-
     return (
       <OtpVerificationGate
         roomId={roomId}
         isVerified={isVerified}
         onVerified={() => setIsVerified(true)}
+        roomMayBeOffline={isRoomAvailable === false}
       />
     );
   }

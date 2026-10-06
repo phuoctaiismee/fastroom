@@ -167,9 +167,24 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
     return () => clearInterval(timer);
   }, []);
 
-  // 5. Fallback polling ONLY when SSE is disconnected (!isConnected)
+  // 5. Auto refresh OTP on Desktop when countdown expires (otpRemainingSeconds <= 1)
   useEffect(() => {
-    if (!roomId || !enabled || isConnected) return;
+    if (isHost && roomId && enabled && otpRemainingSeconds <= 1) {
+      const base = `/api/room/${encodeURIComponent(roomId)}`;
+      fetch(`${base}/otp?role=host`, { cache: 'no-store' })
+        .then((res) => res.json())
+        .then((otpData) => {
+          if (otpData.otp) {
+            useFastroomStore.getState().setOtp(otpData.otp, otpData.remainingSeconds);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [isHost, roomId, enabled, otpRemainingSeconds]);
+
+  // 5. Active synchronization polling (every 3s) to guarantee Desktop image sync on Vercel Serverless
+  useEffect(() => {
+    if (!roomId || !enabled) return;
 
     const syncInterval = setInterval(async () => {
       try {
@@ -178,30 +193,50 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data.files)) {
-            const currentFiles = useFastroomStore.getState().files;
-            const currentIds = new Set(currentFiles.map((f) => f.id));
-            const newFiles = data.files.filter((f: SharedFile) => !currentIds.has(f.id));
+            const store = useFastroomStore.getState();
+            const currentFiles = store.files;
 
-            if (newFiles.length > 0) {
-              for (const f of newFiles) {
-                useFastroomStore.getState().addFile(f);
+            const serverIds = new Set(data.files.map((f: SharedFile) => f.id));
+            const clientIds = new Set(currentFiles.map((f) => f.id));
+
+            // Add/update files that server has but client doesn't (or has different content)
+            for (const serverFile of data.files) {
+              const clientFile = currentFiles.find((f) => f.id === serverFile.id);
+              if (!clientFile) {
+                // New file
+                store.addFile(serverFile);
                 playNotificationSound();
-                toast.success(`Ảnh mới: ${f.name}`, {
-                  description: `${f.senderDevice ? `Từ ${f.senderDevice} • ` : ''}Tự động xóa sau 5 phút.`,
+                toast.success(`Ảnh mới: ${serverFile.name}`, {
+                  description: `${
+                    serverFile.senderDevice ? `Từ ${serverFile.senderDevice} • ` : ''
+                  }Tự động xóa sau 5 phút.`,
                 });
+              } else if (clientFile.isPinned !== serverFile.isPinned) {
+                // Sync pin state
+                store.updateFile(serverFile);
               }
-            } else if (data.files.length !== currentFiles.length) {
-              useFastroomStore.getState().setFiles(data.files);
+            }
+
+            // Remove files client has but server no longer has
+            for (const clientFile of currentFiles) {
+              if (!serverIds.has(clientFile.id)) {
+                store.removeFile(clientFile.id);
+              }
+            }
+
+            // If counts still mismatch after reconcile, do a full reset
+            if (Math.abs(data.files.length - clientIds.size) > 2) {
+              store.setFiles(data.files);
             }
           }
         }
       } catch {
         // Silent background catch
       }
-    }, 4000);
+    }, 3000);
 
     return () => clearInterval(syncInterval);
-  }, [roomId, enabled, isConnected]);
+  }, [roomId, enabled]);
 
   // 5. File upload via Base64 with client-side compression
   const uploadFile = useCallback(

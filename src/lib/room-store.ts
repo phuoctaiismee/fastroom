@@ -30,8 +30,42 @@ interface SerializedRoom {
   hasHost: boolean;
 }
 
-function generate6DigitOtp(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+const OTP_SECRET = 'fastroom_secret_otp_salt_2026';
+
+export function getOtpForTimeWindow(roomId: string, timeWindowIndex: number): string {
+  const normalizedId = roomId.trim().toLowerCase();
+  const input = `${normalizedId}:${timeWindowIndex}:${OTP_SECRET}`;
+
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash << 5) - hash + input.charCodeAt(i);
+    hash |= 0;
+  }
+  const positiveHash = Math.abs(hash);
+  const otpNum = (positiveHash % 900000) + 100000;
+  return otpNum.toString();
+}
+
+export function getCurrentRoomOtpData(roomId: string): {
+  currentOtp: string;
+  prevOtp: string;
+  expiresAt: number;
+  remainingSeconds: number;
+} {
+  const now = Date.now();
+  const windowIndex = Math.floor(now / OTP_TTL_MS); // 60,000 ms
+  const expiresAt = (windowIndex + 1) * OTP_TTL_MS;
+  const remainingSeconds = Math.max(1, Math.ceil((expiresAt - now) / 1000));
+
+  const currentOtp = getOtpForTimeWindow(roomId, windowIndex);
+  const prevOtp = getOtpForTimeWindow(roomId, windowIndex - 1);
+
+  return {
+    currentOtp,
+    prevOtp,
+    expiresAt,
+    remainingSeconds,
+  };
 }
 
 class FastroomManager {
@@ -101,28 +135,22 @@ class FastroomManager {
         const now = Date.now();
 
         if (!room) {
+          const otpData = getCurrentRoomOtpData(normalizedId);
           room = {
             id: normalizedId,
             files: new Map(),
             subscribers: new Set(),
             timers: new Map(),
-            currentOtp: savedRoom.currentOtp || generate6DigitOtp(),
-            prevOtp: savedRoom.prevOtp,
-            otpExpiresAt: savedRoom.otpExpiresAt || now + OTP_TTL_MS,
+            currentOtp: savedRoom.currentOtp || otpData.currentOtp,
+            prevOtp: savedRoom.prevOtp || otpData.prevOtp,
+            otpExpiresAt: savedRoom.otpExpiresAt || otpData.expiresAt,
             authorizedTokens: new Set(savedRoom.authorizedTokens || []),
             createdAt: savedRoom.createdAt || now,
             lastActivityAt: savedRoom.lastActivityAt || now,
             hasHost: savedRoom.hasHost || false,
           };
-          this.setupOtpRotation(normalizedId, room);
           this.rooms.set(normalizedId, room);
         } else {
-          // Sync OTP & security tokens from disk if present
-          if (savedRoom.currentOtp) {
-            room.currentOtp = savedRoom.currentOtp;
-            room.prevOtp = savedRoom.prevOtp;
-            room.otpExpiresAt = savedRoom.otpExpiresAt;
-          }
           if (savedRoom.hasHost) {
             room.hasHost = true;
           }
@@ -161,58 +189,36 @@ class FastroomManager {
     this.loadDiskState(normalizedId);
     let room = this.rooms.get(normalizedId);
     const now = Date.now();
+    const otpData = getCurrentRoomOtpData(normalizedId);
 
     if (!room) {
-      const initialOtp = generate6DigitOtp();
-      const expiresAt = now + OTP_TTL_MS;
-
       room = {
         id: normalizedId,
         files: new Map(),
         subscribers: new Set(),
         timers: new Map(),
-        currentOtp: initialOtp,
-        otpExpiresAt: expiresAt,
+        currentOtp: otpData.currentOtp,
+        prevOtp: otpData.prevOtp,
+        otpExpiresAt: otpData.expiresAt,
         authorizedTokens: new Set(),
         createdAt: now,
         lastActivityAt: now,
         hasHost: isHost,
       };
 
-      // Set up recurring 60s rotation
-      this.setupOtpRotation(normalizedId, room);
       this.rooms.set(normalizedId, room);
       this.saveDiskState();
     } else {
       room.lastActivityAt = now;
+      room.currentOtp = otpData.currentOtp;
+      room.prevOtp = otpData.prevOtp;
+      room.otpExpiresAt = otpData.expiresAt;
       if (isHost) {
         room.hasHost = true;
         this.saveDiskState();
       }
     }
     return room;
-  }
-
-  private setupOtpRotation(normalizedId: string, room: RoomState) {
-    if (room.otpInterval) {
-      clearInterval(room.otpInterval);
-    }
-
-    room.otpInterval = setInterval(() => {
-      const now = Date.now();
-      room.prevOtp = room.currentOtp;
-      room.currentOtp = generate6DigitOtp();
-      room.otpExpiresAt = now + OTP_TTL_MS;
-
-      this.saveDiskState();
-
-      // Broadcast new OTP to clients (desktop screen)
-      this.broadcast(normalizedId, {
-        type: 'otp_rotated',
-        otp: room.currentOtp,
-        expiresAt: room.otpExpiresAt,
-      });
-    }, OTP_TTL_MS);
   }
 
   public getAvailableRooms(): AvailableRoomSummary[] {
@@ -278,13 +284,14 @@ class FastroomManager {
     roomId: string,
     isHost = false
   ): { otp: string; expiresAt: number; remainingSeconds: number } {
-    const room = this.getOrCreateRoom(roomId, isHost);
-    const now = Date.now();
-    const remainingSeconds = Math.max(0, Math.ceil((room.otpExpiresAt - now) / 1000));
+    const normalizedId = roomId.trim().toLowerCase();
+    this.getOrCreateRoom(normalizedId, isHost);
+    const otpData = getCurrentRoomOtpData(normalizedId);
+
     return {
-      otp: room.currentOtp,
-      expiresAt: room.otpExpiresAt,
-      remainingSeconds,
+      otp: otpData.currentOtp,
+      expiresAt: otpData.expiresAt,
+      remainingSeconds: otpData.remainingSeconds,
     };
   }
 
@@ -296,22 +303,33 @@ class FastroomManager {
   ): { success: boolean; authToken?: string; error?: string } {
     const normalizedId = roomId.trim().toLowerCase();
     this.loadDiskState(normalizedId);
-    const room = this.rooms.get(normalizedId);
+    let room = this.rooms.get(normalizedId);
 
-    // If room does not exist or has no active host/subscribers/files
-    if (!room || (!room.hasHost && room.subscribers.size === 0 && room.files.size === 0)) {
-      return {
-        success: false,
-        error: 'Phòng không tồn tại hoặc chưa được mở trên máy tính.',
-      };
+    if (!room) {
+      room = this.getOrCreateRoom(normalizedId, false);
     }
 
     const cleanOtp = candidateOtp.trim();
+    const now = Date.now();
+    const windowIndex = Math.floor(now / OTP_TTL_MS);
 
-    // Valid if matches current OTP or previous OTP (grace period within rotation)
-    const isValid = cleanOtp === room.currentOtp || (room.prevOtp && cleanOtp === room.prevOtp);
+    // Compute OTPs for prev, current, and next windows (handle client clock skew)
+    const currentOtp = getOtpForTimeWindow(normalizedId, windowIndex);
+    const prevOtp = getOtpForTimeWindow(normalizedId, windowIndex - 1);
+    const nextOtp = getOtpForTimeWindow(normalizedId, windowIndex + 1);
+
+    console.log(`[OTP verify] room=${normalizedId} window=${windowIndex} candidate=${cleanOtp} current=${currentOtp} prev=${prevOtp} next=${nextOtp}`);
+
+    // Valid if matches current, previous (grace period), or next window (client clock slightly ahead)
+    const isValid =
+      cleanOtp === currentOtp ||
+      cleanOtp === prevOtp ||
+      cleanOtp === nextOtp ||
+      cleanOtp === room.currentOtp ||
+      (room.prevOtp && cleanOtp === room.prevOtp);
 
     if (!isValid) {
+      console.log(`[OTP verify] FAILED for room=${normalizedId}`);
       return { success: false, error: 'Mã OTP không chính xác hoặc đã hết hạn.' };
     }
 
