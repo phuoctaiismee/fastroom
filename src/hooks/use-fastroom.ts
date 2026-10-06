@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useCallback, useRef } from 'react';
-import { RoomEvent } from '@/lib/room-store';
+import { RoomEvent, SharedFile } from '@/lib/room-store';
 import { useFastroomStore } from '@/stores/room-store';
 import { useDeviceStore } from '@/stores/device-store';
 import { playNotificationSound, compressImageFile } from '@/lib/client-utils';
@@ -79,7 +79,7 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
     }
   }, [roomId, enabled, fetchRoomData]);
 
-  // 3. Setup Server-Sent Events (SSE) for Realtime
+  // 3. Setup Server-Sent Events (SSE) for Realtime + Auto-fetch on connect
   useEffect(() => {
     if (!roomId || !enabled) return;
 
@@ -89,6 +89,7 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
 
     eventSource.onopen = () => {
       useFastroomStore.getState().setIsConnected(true);
+      fetchRoomData();
     };
 
     eventSource.onerror = () => {
@@ -102,6 +103,7 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
 
         if (event.type === 'connected') {
           store.setIsConnected(true);
+          fetchRoomData();
         } else if (event.type === 'file_added') {
           store.addFile(event.file);
           playNotificationSound();
@@ -154,7 +156,7 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
       } catch {}
       eventSourceRef.current = null;
     };
-  }, [roomId, enabled, isHost]);
+  }, [roomId, enabled, isHost, fetchRoomData]);
 
   // 4. Timer ticker every second
   useEffect(() => {
@@ -164,6 +166,42 @@ export function useFastroom({ roomId, enabled = true, isHost = false }: UseFastr
 
     return () => clearInterval(timer);
   }, []);
+
+  // 5. Smart background sync polling (every 2.5s) to guarantee Desktop sync
+  useEffect(() => {
+    if (!roomId || !enabled) return;
+
+    const syncInterval = setInterval(async () => {
+      try {
+        const base = `/api/room/${encodeURIComponent(roomId)}`;
+        const res = await fetch(`${base}/files`, { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.files)) {
+            const currentFiles = useFastroomStore.getState().files;
+            const currentIds = new Set(currentFiles.map((f) => f.id));
+            const newFiles = data.files.filter((f: SharedFile) => !currentIds.has(f.id));
+
+            if (newFiles.length > 0) {
+              for (const f of newFiles) {
+                useFastroomStore.getState().addFile(f);
+                playNotificationSound();
+                toast.success(`Ảnh mới: ${f.name}`, {
+                  description: `${f.senderDevice ? `Từ ${f.senderDevice} • ` : ''}Tự động xóa sau 5 phút.`,
+                });
+              }
+            } else if (data.files.length !== currentFiles.length) {
+              useFastroomStore.getState().setFiles(data.files);
+            }
+          }
+        }
+      } catch {
+        // Silent background catch
+      }
+    }, 2500);
+
+    return () => clearInterval(syncInterval);
+  }, [roomId, enabled]);
 
   // 5. File upload via Base64 with client-side compression
   const uploadFile = useCallback(
